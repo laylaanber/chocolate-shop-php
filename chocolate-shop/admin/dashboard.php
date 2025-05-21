@@ -71,25 +71,54 @@ $revenue_stmt = $db->prepare($revenue_query);
 $revenue_stmt->execute();
 $total_revenue = $revenue_stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0;
 
-// Get monthly revenue for the chart (last 6 months)
-$monthly_revenue_query = "SELECT 
-                           DATE_FORMAT(created_at, '%Y-%m') as month,
-                           DATE_FORMAT(created_at, '%b %Y') as month_name,
-                           SUM(total_amount) as revenue
-                         FROM orders
-                         WHERE status != 'cancelled' AND created_at >= DATE_SUB(NOW(), INTERVAL 6 MONTH)
-                         GROUP BY month
-                         ORDER BY month ASC";
-$monthly_revenue_stmt = $db->prepare($monthly_revenue_query);
-$monthly_revenue_stmt->execute();
-$monthly_revenue_data = $monthly_revenue_stmt->fetchAll(PDO::FETCH_ASSOC);
+// Get daily revenue for the chart (last 15 days including today)
+$daily_revenue_query = "SELECT 
+                        DATE(created_at) as day,
+                        DATE_FORMAT(created_at, '%b %d') as day_name,
+                        SUM(total_amount) as revenue
+                      FROM orders
+                      WHERE status != 'cancelled' AND created_at >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
+                      GROUP BY day
+                      ORDER BY day ASC";
+$daily_revenue_stmt = $db->prepare($daily_revenue_query);
+$daily_revenue_stmt->execute();
+$daily_revenue_data = $daily_revenue_stmt->fetchAll(PDO::FETCH_ASSOC);
 
+// Fill in missing days with zero values - Make sure to include today
 $revenue_labels = [];
 $revenue_data = [];
 
-foreach ($monthly_revenue_data as $month) {
-    $revenue_labels[] = $month['month_name'];
-    $revenue_data[] = $month['revenue'];
+// Create start and end dates for the range
+$end_date = new DateTime(); // Today
+// Set end date to end of the day to ensure today is included
+$end_date->setTime(23, 59, 59); 
+
+$start_date = new DateTime();
+$start_date->modify('-14 days'); // Last 15 days (including today)
+$start_date->setTime(0, 0, 0); // Start of day
+
+// Create a lookup array for existing data
+$revenue_lookup = [];
+foreach ($daily_revenue_data as $day) {
+    $revenue_lookup[$day['day']] = $day['revenue'];
+    // Also store the formatted day name
+    $revenue_lookup[$day['day'] . '_name'] = $day['day_name'];
+}
+
+// Fill array with all days in range
+$current_date = clone $start_date;
+while ($current_date <= $end_date) {
+    $date_string = $current_date->format('Y-m-d');
+    
+    // Use existing data if available, otherwise zero
+    $revenue_data[] = isset($revenue_lookup[$date_string]) ? $revenue_lookup[$date_string] : 0;
+    
+    // Use formatted name if available, otherwise format the current date
+    $revenue_labels[] = isset($revenue_lookup[$date_string . '_name']) ? 
+                         $revenue_lookup[$date_string . '_name'] : 
+                         $current_date->format('M d');
+    
+    $current_date->modify('+1 day');
 }
 
 // Top selling products
@@ -144,250 +173,15 @@ function getStatusIcon($status) {
 }
 ?>
 
-<!-- Custom CSS -->
-<style>
-  /* Modern dashboard styles */
-  .card {
-    border-radius: 10px;
-    box-shadow: 0 0 10px rgba(0,0,0,0.05);
-    border: none;
-    transition: transform 0.2s, box-shadow 0.2s;
-  }
-  .card:hover {
-    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-  }
-  
-  /* Fixed sidebar */
-  .main-sidebar {
-    position: fixed;
-    height: 100%;
-  }
-  
-  /* Stat boxes */
-  .stat-box {
-    border-radius: 10px;
-    padding: 20px;
-    color: white;
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-  }
-  
-  .stat-box h3 {
-    font-size: 2rem;
-    margin-bottom: 0.5rem;
-    font-weight: 700;
-  }
-  
-  .stat-box p {
-    font-size: 1rem;
-    margin-bottom: 0;
-    opacity: 0.9;
-  }
-  
-  .stat-box .icon {
-    position: absolute;
-    top: 15px;
-    right: 15px;
-    font-size: 3rem;
-    opacity: 0.3;
-  }
-  
-  .stat-box .action-link {
-    padding-top: 10px;
-    margin-top: 10px;
-    border-top: 1px solid rgba(255,255,255,0.2);
-    text-align: center;
-    color: white;
-    font-weight: 500;
-    text-decoration: none;
-  }
-  
-  .stat-box .action-link:hover {
-    color: rgba(255,255,255,0.8);
-  }
-  
-  /* Order status pills */
-  .status-pill {
-    border-radius: 50px;
-    padding: 5px 12px;
-    font-size: 0.8rem;
-    font-weight: 500;
-    display: inline-block;
-  }
-  
-  /* Recent orders table */
-  .table-slim {
-    margin-bottom: 0;
-  }
-  
-  .table-slim td {
-    padding: 0.5rem;
-    vertical-align: middle;
-  }
-  
-  /* Product list */
-  .product-card {
-    display: flex;
-    align-items: center;
-    padding: 0.75rem;
-    border-bottom: 1px solid rgba(0,0,0,0.05);
-  }
-  
-  .product-card:last-child {
-    border-bottom: none;
-  }
-  
-  .product-card img {
-    width: 40px;
-    height: 40px;
-    object-fit: cover;
-    border-radius: 5px;
-  }
-  
-  .product-card .product-details {
-    margin-left: 12px;
-    flex-grow: 1;
-  }
-  
-  .product-card .product-name {
-    font-weight: 600;
-    margin-bottom: 2px;
-    font-size: 0.9rem;
-  }
-  
-  .product-card .product-stats {
-    font-size: 0.8rem;
-    color: #6c757d;
-  }
-  
-  .product-card .revenue {
-    font-weight: 600;
-    color: #28a745;
-  }
-  
-  /* Chart containers */
-  .chart-container {
-    position: relative;
-    height: 300px;
-  }
-  
-  /* Activity timeline */
-  .activity-timeline {
-    position: relative;
-    padding-left: 35px;
-  }
-  
-  .activity-timeline::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 14px;
-    width: 2px;
-    background: rgba(0,0,0,0.1);
-  }
-  
-  .timeline-item {
-    position: relative;
-    margin-bottom: 15px;
-  }
-  
-  .timeline-item:last-child {
-    margin-bottom: 0;
-  }
-  
-  .timeline-item .timeline-icon {
-    position: absolute;
-    left: -35px;
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    font-size: 0.8rem;
-    box-shadow: 0 0 0 4px white;
-    z-index: 1;
-  }
-  
-  .timeline-item .timeline-content {
-    background: white;
-    padding: 15px;
-    border-radius: 5px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    border-left: 3px solid #007bff;
-  }
-  
-  .timeline-item .timeline-date {
-    color: #6c757d;
-    font-size: 0.8rem;
-    margin-bottom: 5px;
-  }
-  
-  .timeline-item .timeline-title {
-    font-weight: 600;
-    margin-bottom: 5px;
-    font-size: 0.9rem;
-  }
-  
-  .timeline-item .timeline-body {
-    color: #6c757d;
-    font-size: 0.85rem;
-  }
-  
-  /* Custom card header */
-  .card-header {
-    background-color: transparent;
-    border-bottom: none;
-    padding: 1.25rem 1.25rem 0.5rem;
-  }
-  
-  .card-header .card-title {
-    font-weight: 600;
-    font-size: 1.1rem;
-    margin: 0;
-  }
-  
-  /* Quick action buttons */
-  .quick-action {
-    padding: 0.5rem 1rem;
-    display: flex;
-    align-items: center;
-    border-radius: 5px;
-    margin-bottom: 0.5rem;
-    background: #f8f9fa;
-    transition: background 0.2s;
-    border: none;
-  }
-  
-  .quick-action:hover {
-    background: #e9ecef;
-  }
-  
-  .quick-action i {
-    margin-right: 10px;
-    font-size: 1rem;
-  }
-  
-  .quick-action span {
-    font-weight: 500;
-    font-size: 0.9rem;
-  }
-</style>
-
 <!-- Content Header -->
 <div class="content-header">
   <div class="container-fluid">
     <div class="row mb-2">
       <div class="col-sm-6">
-        <h1 class="m-0">Dashboard</h1>
+        <h1 class="m-0">Dashboard Overview</h1>
       </div>
       <div class="col-sm-6">
         <ol class="breadcrumb float-sm-right">
-          <li class="breadcrumb-item"><a href="#">Home</a></li>
           <li class="breadcrumb-item active">Dashboard</li>
         </ol>
       </div>
@@ -399,165 +193,126 @@ function getStatusIcon($status) {
 <!-- Main content -->
 <section class="content">
   <div class="container-fluid">
-    <!-- Key Stats -->
-    <div class="row mb-4">
-      <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-box bg-gradient-info">
-          <i class="fas fa-shopping-cart icon"></i>
-          <div>
-            <p>Total Orders</p>
-            <h3><?= $orders_count ?></h3>
+    <!-- Key Stats Cards -->
+    <div class="row">
+      <div class="col-lg-3 col-6">
+        <!-- Orders card -->
+        <div class="info-box">
+          <span class="info-box-icon bg-primary elevation-1"><i class="fas fa-shopping-cart"></i></span>
+          <div class="info-box-content">
+            <span class="info-box-text">Total Orders</span>
+            <span class="info-box-number"><?= $orders_count ?></span>
+            <a href="orders.php" class="text-primary">
+              <small>View Orders <i class="fas fa-arrow-right ml-1"></i></small>
+            </a>
           </div>
-          <a href="orders.php" class="action-link">
-            View Orders <i class="fas fa-arrow-right ml-1"></i>
-          </a>
         </div>
       </div>
-      
-      <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-box bg-gradient-success">
-          <i class="fas fa-dollar-sign icon"></i>
-          <div>
-            <p>Total Revenue</p>
-            <h3>$<?= number_format($total_revenue, 2) ?></h3>
+
+      <div class="col-lg-3 col-6">
+        <!-- Revenue card -->
+        <div class="info-box">
+          <span class="info-box-icon bg-success elevation-1"><i class="fas fa-dollar-sign"></i></span>
+          <div class="info-box-content">
+            <span class="info-box-text">Total Revenue</span>
+            <span class="info-box-number">$<?= number_format($total_revenue, 2) ?></span>
+            <a href="orders.php" class="text-success">
+              <small>View Details <i class="fas fa-arrow-right ml-1"></i></small>
+            </a>
           </div>
-          <a href="orders.php" class="action-link">
-            View Details <i class="fas fa-arrow-right ml-1"></i>
-          </a>
         </div>
       </div>
-      
-      <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-box bg-gradient-warning">
-          <i class="fas fa-box icon"></i>
-          <div>
-            <p>Total Products</p>
-            <h3><?= $products_count ?></h3>
+
+      <div class="col-lg-3 col-6">
+        <!-- Products card -->
+        <div class="info-box">
+          <span class="info-box-icon bg-warning elevation-1"><i class="fas fa-box"></i></span>
+          <div class="info-box-content">
+            <span class="info-box-text">Products</span>
+            <span class="info-box-number"><?= $products_count ?></span>
+            <a href="products.php" class="text-warning">
+              <small>Manage Products <i class="fas fa-arrow-right ml-1"></i></small>
+            </a>
           </div>
-          <a href="products.php" class="action-link">
-            Manage Products <i class="fas fa-arrow-right ml-1"></i>
-          </a>
         </div>
       </div>
-      
-      <div class="col-md-3 col-sm-6 mb-3">
-        <div class="stat-box bg-gradient-danger">
-          <i class="fas fa-users icon"></i>
-          <div>
-            <p>Total Customers</p>
-            <h3><?= $users_count ?></h3>
+
+      <div class="col-lg-3 col-6">
+        <!-- Users card -->
+        <div class="info-box">
+          <span class="info-box-icon bg-danger elevation-1"><i class="fas fa-users"></i></span>
+          <div class="info-box-content">
+            <span class="info-box-text">Customers</span>
+            <span class="info-box-number"><?= $users_count ?></span>
+            <a href="manage_users.php" class="text-danger">
+              <small>Manage Users <i class="fas fa-arrow-right ml-1"></i></small>
+            </a>
           </div>
-          <a href="manage_users.php" class="action-link">
-            Manage Users <i class="fas fa-arrow-right ml-1"></i>
-          </a>
         </div>
       </div>
     </div>
-    
-    <!-- Order Status Cards -->
-    <div class="row mb-4">
-      <div class="col-12">
+
+    <!-- Order Status Overview -->
+    <div class="row">
+      <div class="col-md-8">
         <div class="card">
           <div class="card-header">
             <h3 class="card-title">
-              <i class="fas fa-chart-bar mr-1"></i>
-              Order Status Overview
-            </h3>
-          </div>
-          <div class="card-body pb-0">
-            <div class="row">
-              <?php
-              $status_list = ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
-              foreach ($status_list as $status) {
-                $count = $status_counts[$status] ?? 0;
-                $percentage = ($orders_count > 0) ? ($count / $orders_count * 100) : 0;
-                $badge_class = getStatusBadgeClass($status);
-                $icon = getStatusIcon($status);
-              ?>
-                <div class="col">
-                  <div class="info-box bg-light">
-                    <div class="info-box-content">
-                      <span class="info-box-text d-flex align-items-center">
-                        <i class="fas fa-<?= $icon ?> text-<?= $badge_class ?> mr-2"></i>
-                        <?= ucfirst($status) ?>
-                      </span>
-                      <span class="info-box-number">
-                        <?= $count ?>
-                        <small class="text-muted ml-2">(<?= number_format($percentage, 1) ?>%)</small>
-                      </span>
-                      
-                      <div class="progress">
-                        <div class="progress-bar bg-<?= $badge_class ?>" style="width: <?= $percentage ?>%"></div>
-                      </div>
-                      <a href="orders.php?status=<?= $status ?>" class="mt-2 d-block text-sm">
-                        View <?= ucfirst($status) ?> Orders
-                      </a>
-                    </div>
-                  </div>
-                </div>
-              <?php } ?>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Charts Row -->
-    <div class="row mb-4">
-      <!-- Revenue Chart -->
-      <div class="col-md-8 mb-4">
-        <div class="card h-100">
-          <div class="card-header">
-            <h3 class="card-title">
               <i class="fas fa-chart-line mr-1"></i>
-              Revenue Trends
+              Revenue (Last 15 Days)
             </h3>
-            <div class="card-tools">
-              <button type="button" class="btn btn-tool" data-card-widget="collapse">
-                <i class="fas fa-minus"></i>
-              </button>
-            </div>
           </div>
           <div class="card-body">
-            <div class="chart-container">
+            <div class="chart-container" style="height: 300px;">
               <canvas id="revenueChart"></canvas>
             </div>
           </div>
         </div>
       </div>
       
-      <!-- Order Status Pie Chart -->
-      <div class="col-md-4 mb-4">
-        <div class="card h-100">
+      <div class="col-md-4">
+        <div class="card">
           <div class="card-header">
             <h3 class="card-title">
               <i class="fas fa-chart-pie mr-1"></i>
-              Order Distribution
+              Order Status Distribution
             </h3>
-            <div class="card-tools">
-              <button type="button" class="btn btn-tool" data-card-widget="collapse">
-                <i class="fas fa-minus"></i>
-              </button>
-            </div>
           </div>
           <div class="card-body d-flex justify-content-center align-items-center">
             <div class="chart-container" style="height: 240px; width: 100%">
               <canvas id="statusChart"></canvas>
             </div>
           </div>
+          <div class="card-footer">
+            <div class="row text-center">
+              <?php
+              $status_list = ['pending', 'processing', 'shipped', 'delivered', 'cancelled'];
+              foreach ($status_list as $status) {
+                $count = $status_counts[$status] ?? 0;
+                $badge_class = getStatusBadgeClass($status);
+              ?>
+              <div class="col">
+                <div class="description-block border-right">
+                  <span class="badge badge-<?= $badge_class ?> mb-2">
+                    <i class="fas fa-<?= getStatusIcon($status) ?>"></i>
+                  </span>
+                  <h5 class="description-header"><?= $count ?></h5>
+                  <span class="description-text text-uppercase"><?= $status ?></span>
+                </div>
+              </div>
+              <?php } ?>
+            </div>
+          </div>
         </div>
       </div>
     </div>
-    
+
     <div class="row">
       <!-- Recent Orders -->
-      <div class="col-md-8 mb-4">
-        <div class="card h-100">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h3 class="card-title">
-              <i class="fas fa-shopping-cart mr-1"></i>
-              Recent Orders
-            </h3>
+      <div class="col-md-8">
+        <div class="card">
+          <div class="card-header border-transparent">
+            <h3 class="card-title">Recent Orders</h3>
             <div class="card-tools">
               <a href="orders.php" class="btn btn-sm btn-primary">
                 View All
@@ -566,13 +321,13 @@ function getStatusIcon($status) {
           </div>
           <div class="card-body p-0">
             <?php if (empty($recent_orders)): ?>
-              <div class="text-center py-5">
-                <i class="fas fa-box-open fa-3x text-muted mb-3"></i>
-                <p class="text-muted">No orders yet</p>
+              <div class="empty-state">
+                <i class="fas fa-shopping-cart"></i>
+                <p>No orders yet</p>
               </div>
             <?php else: ?>
               <div class="table-responsive">
-                <table class="table table-hover table-slim mb-0">
+                <table class="table m-0">
                   <thead>
                     <tr>
                       <th>Order #</th>
@@ -580,7 +335,7 @@ function getStatusIcon($status) {
                       <th>Date</th>
                       <th>Amount</th>
                       <th>Status</th>
-                      <th></th>
+                      <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -593,7 +348,7 @@ function getStatusIcon($status) {
                         <td><?= date('M j, Y', strtotime($order['created_at'])) ?></td>
                         <td><strong>$<?= number_format($order['total_amount'], 2) ?></strong></td>
                         <td>
-                          <span class="status-pill bg-<?= getStatusBadgeClass($order['status']) ?>">
+                          <span class="badge badge-<?= getStatusBadgeClass($order['status']) ?>">
                             <?= ucfirst($order['status']) ?>
                           </span>
                         </td>
@@ -613,9 +368,9 @@ function getStatusIcon($status) {
       </div>
       
       <div class="col-md-4">
-        <!-- Top Selling Products -->
-        <div class="card mb-4">
-          <div class="card-header d-flex justify-content-between align-items-center">
+        <!-- Top Products -->
+        <div class="card">
+          <div class="card-header">
             <h3 class="card-title">
               <i class="fas fa-trophy mr-1"></i>
               Top Products
@@ -628,33 +383,35 @@ function getStatusIcon($status) {
           </div>
           <div class="card-body p-0">
             <?php if (empty($top_products)): ?>
-              <div class="text-center py-5">
-                <i class="fas fa-box fa-3x text-muted mb-3"></i>
-                <p class="text-muted">No product data available</p>
+              <div class="empty-state">
+                <i class="fas fa-box"></i>
+                <p>No product data available</p>
               </div>
             <?php else: ?>
-              <div class="product-list">
-                <?php foreach ($top_products as $index => $product): ?>
-                  <div class="product-card">
-                    <?php if (!empty($product['image'])): ?>
-                      <img src="../uploads/products/<?= $product['image'] ?>" alt="<?= htmlspecialchars($product['name']) ?>">
-                    <?php else: ?>
-                      <div class="no-image d-flex align-items-center justify-content-center bg-light" style="width:40px;height:40px;border-radius:5px">
-                        <i class="fas fa-box text-secondary"></i>
-                      </div>
-                    <?php endif; ?>
-                    <div class="product-details">
-                      <div class="product-name"><?= htmlspecialchars($product['name']) ?></div>
-                      <div class="product-stats">
+              <ul class="products-list product-list-in-card pl-2 pr-2">
+                <?php foreach ($top_products as $product): ?>
+                  <li class="item">
+                    <div class="product-img">
+                      <?php if (!empty($product['image'])): ?>
+                        <img src="../uploads/products/<?= $product['image'] ?>" alt="<?= htmlspecialchars($product['name']) ?>" class="img-size-50">
+                      <?php else: ?>
+                        <div class="img-size-50 d-flex align-items-center justify-content-center bg-light">
+                          <i class="fas fa-box text-secondary"></i>
+                        </div>
+                      <?php endif; ?>
+                    </div>
+                    <div class="product-info">
+                      <a href="product_form.php?id=<?= $product['id'] ?>" class="product-title">
+                        <?= htmlspecialchars($product['name']) ?>
+                        <span class="badge badge-success float-right">$<?= number_format($product['total_revenue'], 2) ?></span>
+                      </a>
+                      <span class="product-description">
                         <?= $product['total_sold'] ?> units sold
-                      </div>
+                      </span>
                     </div>
-                    <div class="revenue">
-                      $<?= number_format($product['total_revenue'], 2) ?>
-                    </div>
-                  </div>
+                  </li>
                 <?php endforeach; ?>
-              </div>
+              </ul>
             <?php endif; ?>
           </div>
         </div>
@@ -668,33 +425,37 @@ function getStatusIcon($status) {
             </h3>
           </div>
           <div class="card-body">
-            <a href="product_form.php" class="btn btn-block quick-action">
-              <i class="fas fa-plus text-primary"></i>
-              <span>Add New Product</span>
-            </a>
-            <a href="category_form.php" class="btn btn-block quick-action">
-              <i class="fas fa-folder-plus text-warning"></i>
-              <span>Add New Category</span>
-            </a>
-            <a href="orders.php?status=pending" class="btn btn-block quick-action">
-              <i class="fas fa-clock text-info"></i>
-              <span>Pending Orders</span>
-              <?php if (($status_counts['pending'] ?? 0) > 0): ?>
-                <span class="badge badge-warning ml-auto"><?= $status_counts['pending'] ?></span>
-              <?php endif; ?>
-            </a>
-            <?php if ($is_root_admin): ?>
-              <a href="settings.php" class="btn btn-block quick-action">
-                <i class="fas fa-cog text-secondary"></i>
-                <span>Shop Settings</span>
-              </a>
-            <?php endif; ?>
+            <div class="row">
+              <div class="col-6 mb-3">
+                <a href="product_form.php" class="btn btn-primary btn-block btn-sm">
+                  <i class="fas fa-plus mr-1"></i> Add Product
+                </a>
+              </div>
+              <div class="col-6 mb-3">
+                <a href="category_form.php" class="btn btn-info btn-block btn-sm">
+                  <i class="fas fa-folder-plus mr-1"></i> Add Category
+                </a>
+              </div>
+              <div class="col-6">
+                <a href="orders.php?status=pending" class="btn btn-warning btn-block btn-sm">
+                  <i class="fas fa-clock mr-1"></i> Pending Orders
+                  <?php if (isset($status_counts['pending']) && $status_counts['pending'] > 0): ?>
+                    <span class="badge badge-light ml-1"><?= $status_counts['pending'] ?></span>
+                  <?php endif; ?>
+                </a>
+              </div>
+              <div class="col-6">
+                <a href="orders.php" class="btn btn-success btn-block btn-sm">
+                  <i class="fas fa-list mr-1"></i> All Orders
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
     
-    <!-- Activity Timeline -->
+    <!-- Recent Activity -->
     <div class="row">
       <div class="col-12">
         <div class="card">
@@ -706,12 +467,12 @@ function getStatusIcon($status) {
           </div>
           <div class="card-body">
             <?php if (empty($activities)): ?>
-              <div class="text-center py-5">
-                <i class="fas fa-history fa-3x text-muted mb-3"></i>
-                <p class="text-muted">No recent activity</p>
+              <div class="empty-state">
+                <i class="fas fa-history"></i>
+                <p>No recent activity</p>
               </div>
             <?php else: ?>
-              <div class="activity-timeline">
+              <div class="timeline">
                 <?php 
                 $current_date = '';
                 foreach ($activities as $activity): 
@@ -721,29 +482,38 @@ function getStatusIcon($status) {
                   $badge_class = getStatusBadgeClass($activity['status']);
                   $icon = getStatusIcon($activity['status']);
                 ?>
-                  <div class="timeline-item">
-                    <div class="timeline-icon bg-<?= $badge_class ?>">
-                      <i class="fas fa-<?= $icon ?>"></i>
+                  
+                  <?php if ($show_date): ?>
+                    <!-- timeline time label -->
+                    <div class="time-label">
+                      <span class="bg-secondary"><?= date('F j, Y', strtotime($activity['created_at'])) ?></span>
                     </div>
-                    <div class="timeline-content">
-                      <div class="timeline-date">
-                        <?= date('M j, Y g:i A', strtotime($activity['created_at'])) ?>
-                      </div>
-                      <div class="timeline-title">
-                        <a href="order_detail.php?id=<?= $activity['order_id'] ?>">
-                          Order #<?= $activity['order_id'] ?>
-                        </a> 
+                  <?php endif; ?>
+                  
+                  <!-- timeline item -->
+                  <div>
+                    <i class="fas fa-<?= $icon ?> bg-<?= $badge_class ?>"></i>
+                    <div class="timeline-item">
+                      <span class="time">
+                        <i class="fas fa-clock"></i> <?= date('g:i A', strtotime($activity['created_at'])) ?>
+                      </span>
+                      <h3 class="timeline-header">
+                        <a href="order_detail.php?id=<?= $activity['order_id'] ?>">Order #<?= $activity['order_id'] ?></a> 
                         was marked as <span class="font-weight-bold text-<?= $badge_class ?>"><?= ucfirst($activity['status']) ?></span>
                         by <?= htmlspecialchars($activity['username'] ?? 'System') ?>
-                      </div>
+                      </h3>
                       <?php if (!empty($activity['notes'])): ?>
                         <div class="timeline-body">
-                          "<?= htmlspecialchars(substr($activity['notes'], 0, 100)) ?><?= strlen($activity['notes']) > 100 ? '...' : '' ?>"
+                          <?= htmlspecialchars(substr($activity['notes'], 0, 100)) ?><?= strlen($activity['notes']) > 100 ? '...' : '' ?>
                         </div>
                       <?php endif; ?>
                     </div>
                   </div>
                 <?php endforeach; ?>
+                
+                <div>
+                  <i class="fas fa-clock bg-gray"></i>
+                </div>
               </div>
             <?php endif; ?>
           </div>
@@ -758,9 +528,6 @@ function getStatusIcon($status) {
 <script src="https://cdn.jsdelivr.net/npm/chart.js@3.7.1/dist/chart.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-  // Fix sidebar
-  document.body.classList.add('layout-fixed');
-  
   // Revenue Chart
   const revenueChartCanvas = document.getElementById('revenueChart').getContext('2d');
   
@@ -773,7 +540,7 @@ document.addEventListener('DOMContentLoaded', function() {
     data: {
       labels: <?= json_encode($revenue_labels) ?>,
       datasets: [{
-        label: 'Revenue',
+        label: 'Daily Revenue',
         data: <?= json_encode($revenue_data) ?>,
         backgroundColor: revenueGradient,
         borderColor: '#28a745',
@@ -823,7 +590,10 @@ document.addEventListener('DOMContentLoaded', function() {
           ticks: {
             font: {
               size: 10
-            }
+            },
+            maxRotation: 0,
+            autoSkip: true,
+            maxTicksLimit: 15
           }
         },
         y: {
@@ -899,8 +669,4 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 
-<?php 
-// Fix for the sidebar - add to admin_footer.php if needed
-echo '<script>document.body.classList.add("layout-fixed");</script>';
-require_once '../includes/admin_footer.php'; 
-?>
+<?php require_once '../includes/admin_footer.php'; ?>

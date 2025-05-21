@@ -174,6 +174,54 @@ if (!$read_only_mode && isset($_POST['toggle_root_admin']) && isset($_POST['user
     }
 }
 
+// Handle quick role changes (promotion/demotion)
+if (!$read_only_mode && isset($_POST['quick_role_change']) && isset($_POST['user_id']) && isset($_POST['new_role'])) {
+    $user_id = $_POST['user_id'];
+    $new_role = $_POST['new_role'];
+    
+    // Only root admins can change roles
+    if (!$is_root_admin) {
+        $error = "Only root administrators can change user roles!";
+    }
+    // Prevent changing own role (though UI shouldn't allow this)
+    else if ($user_id == $_SESSION['user_id']) {
+        $error = "You cannot change your own role!";
+    } 
+    // Make sure new_role is valid
+    else if (!in_array($new_role, ['admin', 'user'])) {
+        $error = "Invalid role specified!";
+    } 
+    else {
+        try {
+            // Get current role to log change properly
+            $current_role_query = "SELECT role FROM users WHERE id = ?";
+            $current_role_stmt = $db->prepare($current_role_query);
+            $current_role_stmt->execute([$user_id]);
+            $current_role = $current_role_stmt->fetchColumn();
+            
+            // Update the role
+            $query = "UPDATE users SET role = ? WHERE id = ?";
+            $stmt = $db->prepare($query);
+            $stmt->execute([$new_role, $user_id]);
+            
+            // If demoting from admin, ensure they no longer have root privileges
+            if ($current_role === 'admin' && $new_role === 'user') {
+                $query = "UPDATE users SET is_root_admin = 0 WHERE id = ?";
+                $stmt = $db->prepare($query);
+                $stmt->execute([$user_id]);
+            }
+            
+            $role_change_text = ($new_role === 'admin') ? 'promoted to admin' : 'demoted to regular user';
+            $message = "User has been $role_change_text successfully.";
+            
+            // Log the action
+            logAdminAction($db, $_SESSION['user_id'], "Changed user ID: $user_id role from $current_role to $new_role");
+        } catch (PDOException $e) {
+            $error = "Error updating user role: " . $e->getMessage();
+        }
+    }
+}
+
 // Get filters
 $role_filter = isset($_GET['role']) ? $_GET['role'] : '';
 $status_filter = isset($_GET['status']) ? $_GET['status'] : '';
@@ -345,14 +393,25 @@ if (!$read_only_mode && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['u
             $stmt = $db->prepare($update);
             $stmt->execute([$username, $email, $phone, $role, $is_active, $notes, $user_id]);
             
-            // Handle password change if requested
-            if (!empty($_POST['password'])) {
+            // Handle password change if requested - but only for the user's own account
+            if (!empty($_POST['password']) && $user_id == $_SESSION['user_id']) {
                 $password = $_POST['password'];
                 $hashed_password = password_hash($password, PASSWORD_DEFAULT);
                 
                 $pass_update = "UPDATE users SET password = ? WHERE id = ?";
                 $pass_stmt = $db->prepare($pass_update);
                 $pass_stmt->execute([$hashed_password, $user_id]);
+                
+                // Log successful password change
+                logAdminAction($db, $_SESSION['user_id'], "Updated own password");
+            } elseif (!empty($_POST['password']) && $user_id != $_SESSION['user_id']) {
+                // If someone tries to change another user's password, log the attempt
+                logAdminAction($db, $_SESSION['user_id'], "SECURITY: Attempted to change password for user ID: $user_id (blocked)");
+                $error = "Security restriction: You can only change your own password.";
+                // Roll back transaction
+                $db->rollback();
+                // Exit the function and don't proceed with other updates
+                return;
             }
             
             // Log the action
@@ -771,36 +830,6 @@ function getStatusBadgeClass($status) {
 </div>
 <?php endif; ?>
 
-<!-- Replace the existing alerts with this improved version -->
-<?php if (!empty($message) || !empty($error)): ?>
-<div class="alert-container position-fixed">
-  <?php if (!empty($message)): ?>
-    <div class="alert alert-success alert-dismissible fade show">
-      <div class="d-flex align-items-center">
-        <i class="fas fa-check-circle mr-2"></i>
-        <div><?= $message ?></div>
-        <button type="button" class="close ml-2" data-dismiss="alert" aria-label="Close">
-          <span aria-hidden="true">&times;</span>
-        </button>
-      </div>
-    </div>
-  <?php endif; ?>
-  
-  <?php if (!empty($error)): ?>
-    <div class="alert alert-danger alert-dismissible fade show">
-      <div class="d-flex align-items-center">
-        <i class="fas fa-exclamation-circle mr-2"></i>
-        <div><?= $error ?></div>
-        <button type="button" class="close ml-2" data-dismiss="alert" aria-label="Close">
-          <span aria-hidden="true">&times;</span>
-        </button>
-      </div>
-    </div>
-  <?php endif; ?>
-</div>
-<?php endif; ?>
-
-<!-- Improve the main layout structure -->
 <div class="row">
   <?php if ($edit_user): ?>
   <div class="col-md-8">
@@ -841,6 +870,75 @@ function getStatusBadgeClass($status) {
         </ul>
       </div>
       <div class="card-body">
+        <!-- Show root admin notice only once per session using session variable -->
+        <?php 
+        // Only show the root admin message if this is first visit or explicitly requested
+        $show_root_notice = $is_root_admin && (!isset($_SESSION['root_notice_shown']) || isset($_GET['show_help']));
+        if ($show_root_notice): 
+          // Mark as shown in the session
+          $_SESSION['root_notice_shown'] = true;
+        ?>
+          <div class="alert alert-primary alert-dismissible mb-3">
+            <div class="d-flex align-items-center">
+              <i class="fas fa-crown mr-3" style="font-size: 1.5rem;"></i>
+              <div>
+                <strong>Root Admin Privileges:</strong>
+                <p class="mb-0">As a root administrator, you can view all admin accounts, upgrade users to admins, and demote admins to users. You also have exclusive access to grant or revoke root admin privileges.</p>
+              </div>
+            </div>
+            <button type="button" class="close" data-dismiss="alert">&times;</button>
+          </div>
+        <?php endif; ?>
+        
+        <!-- Security notice - show only when editing users and can be dismissed permanently -->
+        <?php 
+        // Only show security notice when actually editing a user or when explicitly requested
+        $show_security_notice = (isset($_GET['edit']) || isset($_GET['show_help'])) && 
+                                !isset($_SESSION['security_notice_dismissed']);
+        
+        if ($show_security_notice): 
+        ?>
+          <div class="alert alert-info alert-dismissible mb-3" id="security-notice">
+            <div class="d-flex align-items-center">
+              <i class="fas fa-shield-alt mr-3" style="font-size: 1.5rem;"></i>
+              <div>
+                <strong>Security Notice:</strong>
+                <p class="mb-0">For security reasons, administrators can only change their own passwords. If a user forgets their password, you can direct them to the password reset feature.</p>
+              </div>
+            </div>
+            <button type="button" class="close" id="dismiss-security-notice" data-dismiss="alert">&times;</button>
+          </div>
+        <?php endif; ?>
+        
+        <!-- Error/success messages - only shown when they exist -->
+        <?php if (!empty($message) || !empty($error)): ?>
+          <div class="alert-container">
+            <?php if (!empty($message)): ?>
+              <div class="alert alert-success alert-dismissible fade show">
+                <div class="d-flex align-items-center">
+                  <i class="fas fa-check-circle mr-2"></i>
+                  <div><?= $message ?></div>
+                  <button type="button" class="close ml-2" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                  </button>
+                </div>
+              </div>
+            <?php endif; ?>
+            
+            <?php if (!empty($error)): ?>
+              <div class="alert alert-danger alert-dismissible fade show">
+                <div class="d-flex align-items-center">
+                  <i class="fas fa-exclamation-circle mr-2"></i>
+                  <div><?= $error ?></div>
+                  <button type="button" class="close ml-2" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                  </button>
+                </div>
+              </div>
+            <?php endif; ?>
+          </div>
+        <?php endif; ?>
+        
         <!-- Search & Filter -->
         <div class="row mb-3">
           <div class="col-md-8">
@@ -876,7 +974,7 @@ function getStatusBadgeClass($status) {
             <?php endif; ?>
           </div>
         </div>
-        
+
         <!-- Users Table -->
         <div class="table-responsive">
           <?php if (empty($users)): ?>
@@ -980,12 +1078,30 @@ function getStatusBadgeClass($status) {
                     <td>
                       <?php if ($user['role'] === 'admin'): ?>
                         <?php if (isset($user['is_root_admin']) && $user['is_root_admin']): ?>
-                          <span class="badge badge-danger">Root Admin</span>
+                          <span class="badge badge-danger">
+                            <i class="fas fa-crown mr-1"></i> Root Admin
+                          </span>
                         <?php else: ?>
-                          <span class="badge badge-danger">Admin</span>
+                          <span class="badge badge-danger">
+                            <i class="fas fa-user-shield mr-1"></i> Admin
+                          </span>
                         <?php endif; ?>
                       <?php else: ?>
-                        <span class="badge badge-info">User</span>
+                        <span class="badge badge-info">
+                          <i class="fas fa-user mr-1"></i> User
+                        </span>
+                      <?php endif; ?>
+                      
+                      <?php if ($is_root_admin && !$read_only_mode && $user['id'] != $_SESSION['user_id']): ?>
+                        <?php if ($user['role'] === 'user'): ?>
+                          <a href="#" class="badge badge-light ml-1" data-toggle="tooltip" title="You can promote this user to admin">
+                            <i class="fas fa-level-up-alt"></i>
+                          </a>
+                        <?php elseif ($user['role'] === 'admin' && (!isset($user['is_root_admin']) || !$user['is_root_admin'])): ?>
+                          <a href="#" class="badge badge-light ml-1" data-toggle="tooltip" title="You can demote this admin to regular user">
+                            <i class="fas fa-level-down-alt"></i>
+                          </a>
+                        <?php endif; ?>
                       <?php endif; ?>
                     </td>
                     <td><span title="<?= date('F j, Y H:i', strtotime($user['created_at'])) ?>"><?= date('M j, Y', strtotime($user['created_at'])) ?></span></td>
@@ -1070,6 +1186,26 @@ function getStatusBadgeClass($status) {
                               <?php endif; ?>
                             </form>
                           <?php endif; ?>
+                        <?php endif; ?>
+
+                        <?php if ($is_root_admin && !$read_only_mode && $user['id'] != $_SESSION['user_id']): ?>
+                          <!-- Add quick role change buttons for root admins -->
+                          <form method="post" class="d-inline">
+                            <input type="hidden" name="user_id" value="<?= $user['id'] ?>">
+                            <?php if ($user['role'] === 'user'): ?>
+                              <input type="hidden" name="new_role" value="admin">
+                              <button type="submit" name="quick_role_change" class="btn btn-sm btn-info" title="Promote to Admin"
+                                      onclick="return confirm('Are you sure you want to promote this user to admin? They will have access to admin features.')">
+                                <i class="fas fa-level-up-alt"></i>
+                              </button>
+                            <?php elseif ($user['role'] === 'admin' && !isset($user['is_root_admin'])): ?>
+                              <input type="hidden" name="new_role" value="user">
+                              <button type="submit" name="quick_role_change" class="btn btn-sm btn-warning" title="Demote to User"
+                                      onclick="return confirm('Are you sure you want to demote this admin to regular user? They will lose all admin privileges.')">
+                                <i class="fas fa-level-down-alt"></i>
+                              </button>
+                            <?php endif; ?>
+                          </form>
                         <?php endif; ?>
 
                         <?php if ($read_only_mode): ?>
@@ -1215,9 +1351,20 @@ function getStatusBadgeClass($status) {
                   <div class="input-group-prepend">
                     <span class="input-group-text"><i class="fas fa-lock"></i></span>
                   </div>
-                  <input type="password" class="form-control" id="password" name="password">
+                  <?php if ($edit_user['id'] == $_SESSION['user_id']): ?>
+                    <input type="password" class="form-control" id="password" name="password">
+                    <small class="form-text text-muted">Leave blank to keep current password</small>
+                  <?php else: ?>
+                    <input type="password" class="form-control" disabled placeholder="••••••••">
+                    <div class="input-group-append">
+                      <span class="input-group-text bg-warning text-dark"><i class="fas fa-lock mr-1"></i> Protected</span>
+                    </div>
+                    <small class="form-text text-warning">
+                      <i class="fas fa-shield-alt mr-1"></i>
+                      For security reasons, you cannot view or change another user's password
+                    </small>
+                  <?php endif; ?>
                 </div>
-                <small class="form-text text-muted">Leave blank to keep current password</small>
               </div>
               
               <div class="form-group">
@@ -1226,20 +1373,59 @@ function getStatusBadgeClass($status) {
                   <div class="input-group-prepend">
                     <span class="input-group-text"><i class="fas fa-user-tag"></i></span>
                   </div>
-                  <select class="form-control" id="role" name="role" 
-                          <?= $edit_user['id'] == $_SESSION['user_id'] ? 'disabled' : '' ?>>
-                    <option value="user" <?= $edit_user['role'] === 'user' ? 'selected' : '' ?>>Regular User</option>
-                    <?php if ($is_root_admin || $edit_user['role'] === 'admin'): ?>
+                  <?php if ($is_root_admin && $edit_user['id'] != $_SESSION['user_id']): ?>
+                    <!-- Root admins can change any user's role except their own -->
+                    <select class="form-control" id="role" name="role">
+                      <option value="user" <?= $edit_user['role'] === 'user' ? 'selected' : '' ?>>Regular User</option>
                       <option value="admin" <?= $edit_user['role'] === 'admin' ? 'selected' : '' ?>>Administrator</option>
+                    </select>
+                    <?php if ($edit_user['role'] === 'user'): ?>
+                      <div class="input-group-append">
+                        <span class="input-group-text bg-info text-white"><i class="fas fa-level-up-alt mr-1"></i> Can Promote</span>
+                      </div>
+                    <?php elseif ($edit_user['role'] === 'admin'): ?>
+                      <div class="input-group-append">
+                        <span class="input-group-text bg-warning text-dark"><i class="fas fa-level-down-alt mr-1"></i> Can Demote</span>
+                      </div>
                     <?php endif; ?>
-                  </select>
+                  <?php elseif ($edit_user['id'] == $_SESSION['user_id']): ?>
+                    <!-- Users cannot change their own role -->
+                    <select class="form-control" id="role" name="role" disabled>
+                      <option value="user" <?= $edit_user['role'] === 'user' ? 'selected' : '' ?>>Regular User</option>
+                      <option value="admin" <?= $edit_user['role'] === 'admin' ? 'selected' : '' ?>>Administrator</option>
+                    </select>
+                    <div class="input-group-append">
+                      <span class="input-group-text bg-secondary text-white"><i class="fas fa-lock mr-1"></i> Cannot Change</span>
+                    </div>
+                  <?php else: ?>
+                    <!-- Non-root admins can only see but not change role -->
+                    <select class="form-control" id="role" name="role" disabled>
+                      <option value="user" <?= $edit_user['role'] === 'user' ? 'selected' : '' ?>>Regular User</option>
+                      <option value="admin" <?= $edit_user['role'] === 'admin' ? 'selected' : '' ?>>Administrator</option>
+                    </select>
+                    <div class="input-group-append">
+                      <span class="input-group-text bg-secondary text-white"><i class="fas fa-lock mr-1"></i> Root Only</span>
+                    </div>
+                  <?php endif; ?>
                 </div>
+                
                 <?php if ($edit_user['id'] == $_SESSION['user_id']): ?>
                   <input type="hidden" name="role" value="<?= $edit_user['role'] ?>">
-                  <small class="form-text text-warning"><i class="fas fa-exclamation-triangle mr-1"></i> You cannot change your own role.</small>
-                <?php endif; ?>
-                <?php if ($edit_user['role'] === 'admin' && !$is_root_admin && $edit_user['id'] != $_SESSION['user_id']): ?>
-                  <small class="form-text text-warning"><i class="fas fa-exclamation-triangle mr-1"></i> Only root administrators can modify admin roles.</small>
+                  <small class="form-text text-warning">
+                    <i class="fas fa-exclamation-triangle mr-1"></i> 
+                    For security reasons, you cannot change your own role.
+                  </small>
+                <?php elseif (!$is_root_admin): ?>
+                  <input type="hidden" name="role" value="<?= $edit_user['role'] ?>">
+                  <small class="form-text text-warning">
+                    <i class="fas fa-shield-alt mr-1"></i> 
+                    Only root administrators can upgrade or downgrade user roles.
+                  </small>
+                <?php elseif ($is_root_admin && $edit_user['role'] === 'admin'): ?>
+                  <small class="form-text text-warning">
+                    <i class="fas fa-exclamation-triangle mr-1"></i>
+                    Warning: Demoting an admin will remove all their administrative privileges.
+                  </small>
                 <?php endif; ?>
               </div>
               
@@ -1426,6 +1612,10 @@ function getStatusBadgeClass($status) {
               </div>
               <input type="password" class="form-control" id="new_password" name="password" required>
             </div>
+            <small class="form-text text-muted">
+              <i class="fas fa-info-circle mr-1"></i>
+              You can set the initial password, but for security reasons, you cannot view or change it later
+            </small>
           </div>
           
           <div class="form-group">
@@ -1513,5 +1703,34 @@ CREATE TABLE IF NOT EXISTS admin_logs (
   FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE CASCADE
 );
 -->
+
+<script>
+// Wait until document is ready
+$(document).ready(function() {
+  // Handle permanent dismissal of security notice
+  $('#dismiss-security-notice').on('click', function() {
+    // Set a flag in session via AJAX
+    $.ajax({
+      url: 'dismiss_notice.php',
+      method: 'POST',
+      data: { 
+        notice_type: 'security_notice_dismissed',
+        csrf_token: '<?= $_SESSION['csrf_token'] ?? '' ?>' 
+      },
+      success: function(response) {
+        console.log('Notice dismissed');
+      }
+    });
+  });
+  
+  // Auto-hide alerts after 5 seconds
+  setTimeout(function() {
+    $('.alert-success, .alert-danger').fadeOut('slow');
+  }, 5000);
+  
+  // Initialize tooltips
+  $('[data-toggle="tooltip"]').tooltip();
+});
+</script>
 
 <?php require_once '../includes/admin_footer.php'; ?>
